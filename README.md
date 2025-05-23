@@ -9,7 +9,7 @@ Para facilitar el inicio del TP, van a encontrar dos archivos `.c`, uno para cad
 
 Para compilarlos, utilizar el comando `make`. Por ejemplo, para compilar `server-tftp.c` debe ejecutar el comando `make server-tftp` (sin la extensión `.c`). De manera similar, pueden compilar `server-chat.c`. Si no indican un parámetro a `make`, se compilan ambos programas.
 
-## Entrega
+## Entrega 
 
 Para la entrega final, generar un archivo zip mediante `make zip` y enviarlo por email.
 
