@@ -91,62 +91,99 @@ int main(int argc, char *argv[])
         switch (opcode)
         {
         case 1: /* RRQ */
-        case 2: /* WRQ */
         {
             /* En RRQ/WRQ el payload es:
              *   Filename\0Mode\0
              */
-            char *filename = pkt.payload;
-            char *mode = filename + strlen(filename) + 1;
-
-            if (opcode == 1)
-                printf("RRQ: ");
-            else
-                printf("WRQ: ");
-
+            char *filename = pkt.payload;                 // Puntero a donde empieza el string filename
+            char *mode = filename + strlen(filename) + 1; // Puntero al final del filename + 1 = mode
             printf("filename=\"%s\", mode=\"%s\"\n", filename, mode);
+
+            FILE *fd = fopen(filename, "r");
+            if (fd == NULL)
+            {
+                perror("Error al abrir el archivo");
+                exit(EXIT_FAILURE);
+            }
+
+            size_t cantidad_bytes = 512;
+            char buffer[512];
+
+            uint16_t bloque = 1;
+            size_t leidos = 0;
+            do
+            {
+                leidos = fread(buffer, 1, cantidad_bytes, fd);
+
+                tftp_packet_t data_pkt;
+                data_pkt.opcode = htons(3); // Opcode para DATA
+
+                // Número de bloque (ej: bloque 1, 2, 3, etc.)
+                uint16_t block_number = htons(bloque); // Incrementalo en cada iteración
+
+                // Copiar el número de bloque (2 bytes) al principio del payload
+                memcpy(data_pkt.payload, &block_number, 2);
+
+                // Copiar los datos leídos desde el archivo (hasta 512 bytes)
+                memcpy(data_pkt.payload + 2, buffer, leidos);
+
+                // Enviar el paquete
+                ssize_t total_len = 2 /*opcode*/ + 2 /*block*/ + leidos;
+                sendto(socketfd, &data_pkt, total_len, 0, (struct sockaddr *)&client, client_len);
+
+                bloque++;
+
+            } while (leidos == cantidad_bytes);
+
+            if (feof(fd))
+            {
+                printf("Se llegó al final del archivo\n");
+            }
+        }
+
+        case 2: /* WRQ */
+        {
             break;
         }
 
-        case 3:
-        { /* DATA */
-            /* En DATA el payload es:
-             *   Block# (2 bytes) | Data (hasta 512 bytes)
-             */
-            uint16_t block = ntohs(*(uint16_t *)pkt.payload);
-            size_t data_len = n - 2 /*opcode*/ - 2 /*block#*/;
-            char *data = pkt.payload + 2;
+            // case 3:
+            // { /* DATA */
+            //     /* En DATA el payload es:
+            //      *   Block# (2 bytes) | Data (hasta 512 bytes)
+            //      */
+            //     uint16_t block = ntohs(*(uint16_t *)pkt.payload);
+            //     size_t data_len = n - 2 /*opcode*/ - 2 /*block#*/;
+            //     char *data = pkt.payload + 2;
 
-            printf("DATA: block=%u, data_len=%zu bytes\n", block, data_len);
+            //     printf("DATA: block=%u, data_len=%zu bytes\n", block, data_len);
 
-            break;
-        }
+            //     break;
+            // }
 
-        case 4:
-        { /* ACK */
-            /* En ACK el payload es:
-             *   Block# (2 bytes)
-             */
-            uint16_t block = ntohs(*(uint16_t *)pkt.payload);
-            printf("ACK: bloque=%u\n", block);
-            break;
-        }
+            // case 4:
+            // { /* ACK */
+            //     /* En ACK el payload es:
+            //      *   Block# (2 bytes)
+            //      */
+            //     uint16_t block = ntohs(*(uint16_t *)pkt.payload);
+            //     printf("ACK: bloque=%u\n", block);
+            //     break;
+            // }
 
-        case 5:
-        { /* ERROR */
-            /* En ERROR el payload es:
-             *   ErrorCode (2 bytes) | ErrMsg\0
-             */
-            uint16_t errcode = ntohs(*(uint16_t *)pkt.payload);
-            char *errmsg = pkt.payload + 2;
-            printf("ERROR: código=%u, mensaje=\"%s\"\n", errcode, errmsg);
-            break;
-        }
+            // case 5:
+            // { /* ERROR */
+            //     /* En ERROR el payload es:
+            //      *   ErrorCode (2 bytes) | ErrMsg\0
+            //      */
+            //     uint16_t errcode = ntohs(*(uint16_t *)pkt.payload);
+            //     char *errmsg = pkt.payload + 2;
+            //     printf("ERROR: código=%u, mensaje=\"%s\"\n", errcode, errmsg);
+            //     break;
+            // }
 
         default:
             printf("Opcode desconocido: %u\n", opcode);
         }
-
     }
     close(socketfd);
     return 0;
