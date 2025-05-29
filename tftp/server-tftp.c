@@ -131,6 +131,26 @@ int main(int argc, char *argv[])
                 ssize_t total_len = 2 /*opcode*/ + 2 /*block*/ + leidos;
                 sendto(socketfd, &data_pkt, total_len, 0, (struct sockaddr *)&client, client_len);
 
+                // Esperar ACK
+                tftp_packet_t ack_pkt;
+                ssize_t ack_len = recvfrom(socketfd, &ack_pkt, sizeof(ack_pkt), 0, (struct sockaddr *)&client, &client_len);
+                if (ack_len < 4 || ntohs(ack_pkt.opcode) != 4) // verifica que el paquete sea de minimo 4 bytes y que el opcde sea 4, o sea, un ACK
+                {
+                    fprintf(stderr, "ACK inválido o error de recepción\n");
+                    break;
+                }
+
+                // extrae los dos primeros bytes del payload que son el numero de bloque de ACK que envia el cliente
+                uint16_t ack_block;
+                memcpy(&ack_block, ack_pkt.payload, 2);
+                ack_block = ntohs(ack_block);
+
+                if (ack_block != bloque)
+                {
+                    fprintf(stderr, "ACK inesperado. Se esperaba %d, pero llegó %d\n", bloque, ack_block);
+                    break;
+                }
+
                 bloque++;
 
             } while (leidos == cantidad_bytes);

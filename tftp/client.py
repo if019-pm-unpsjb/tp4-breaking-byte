@@ -77,5 +77,41 @@ if operacion == "READ":
     print(f"Archivo recibido como _{filename}")
 
 # Escribir un archivo en el servidor remoto
-if (operacion == "WRITE"):
-    print("Inicio Operacion Write") # PENDING
+if operacion == "WRITE":
+    try:
+        with open(filename, "rb") as f:
+            # Esperar ACK de bloque 0, si llega entonces se comienza la transferencia
+            ack_packet, server_address = sock.recvfrom(516)
+            if ack_packet[0:2] != b'\x00\x04' or ack_packet[2:4] != b'\x00\x00':
+                print("Error: No se recibió ACK de bloque 0")
+                sys.exit(1)
+
+            finish = False
+            block_number = 1
+
+            while not finish:
+                data = f.read(512)
+                data_packet = b'\x00\x03' + block_number.to_bytes(2, byteorder='big') + data
+                sock.sendto(data_packet, server_address)
+
+                # Esperar ACK para el bloque enviado
+                ack_packet, _ = sock.recvfrom(516)
+                ack_opcode = ack_packet[0:2]
+                ack_block = int.from_bytes(ack_packet[2:4], byteorder='big')
+
+                if ack_opcode != b'\x00\x04' or ack_block != block_number:
+                    print(f"Error o ACK inesperado. Esperado: {block_number}, Recibido: {ack_block}")
+                    sys.exit(1)
+
+                if len(data) < 512:
+                    print("Archivo enviado correctamente")
+                    finish = True
+
+                block_number += 1
+
+    except FileNotFoundError:
+        print(f"No se pudo abrir el archivo {filename}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error durante la escritura: {e}")
+        sys.exit(1)
