@@ -103,7 +103,26 @@ int main(int argc, char *argv[])
             if (fd == NULL)
             {
                 perror("Error al abrir el archivo");
-                exit(EXIT_FAILURE);
+
+                // Construir paquete de error
+                tftp_packet_t error_pkt;
+                error_pkt.opcode = htons(5); // Opcode de error
+
+                uint16_t error_code = htons(1); // File not found
+                memcpy(error_pkt.payload, &error_code, 2);
+
+                const char *msg = "File not found";
+                strcpy(error_pkt.payload + 2, msg); // Copiar el mensaje
+                size_t msg_len = strlen(msg);
+
+                error_pkt.payload[2 + msg_len] = '\0'; // Terminador
+
+                // Calcular longitud total: 2 (opcode) + 2 (code) + msg_len + 1 (null)
+                ssize_t error_len = 2 + 2 + msg_len + 1;
+
+                sendto(socketfd, &error_pkt, error_len, 0, (struct sockaddr *)&client, client_len);
+
+                continue;
             }
 
             size_t cantidad_bytes = 512;

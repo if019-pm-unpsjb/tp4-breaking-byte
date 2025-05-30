@@ -39,8 +39,8 @@ sock.sendto(request_packet, (ip, port))
 # Leer un archivo del servidor remoto y copiarlo en un archivo local
 if operacion == "READ":
     finish = False
+    file_created = False
     block_number_expected = 1
-    local_file = open("_" + filename, "wb")  # Guardar archivo recibido
 
     while not finish:
         
@@ -52,6 +52,11 @@ if operacion == "READ":
 
         if opcode == b'\x00\x03':  # DATA
             if block_number == block_number_expected:
+
+                if (not file_created):
+                    local_file = open("_" + filename, "wb")  # Guardar archivo recibido
+                    file_created = True
+
                 local_file.write(data)
 
                 # Enviar ACK
@@ -71,7 +76,7 @@ if operacion == "READ":
             error_code = int.from_bytes(data_packet[2:4], byteorder='big')
             error_msg = data_packet[4:-1].decode()
             print(f"Error del servidor: {error_msg} (Código {error_code})")
-            finish = True
+            sys.exit(1) # Terminar el programa
 
     local_file.close()
     print(f"Archivo recibido como _{filename}")
