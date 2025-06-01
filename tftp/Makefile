@@ -9,7 +9,7 @@ all: $(PROGS)
 
 LIST=$(addprefix $(BIN)/, $(PROGS))
 
-server-tftp: server-tftp.c 
+server-tftp: servidor/server-tftp.c 
 	$(CC) -o bin/$@ $^ $(CFLAGS)
 
 .PHONY: clean
