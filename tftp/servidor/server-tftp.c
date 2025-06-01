@@ -7,10 +7,13 @@
 #include <arpa/inet.h>
 #include <netinet/in.h> // struct sockaddr_in
 #include <errno.h>
+#include <sys/time.h>
 
 #define TFTP_MAX_PAYLOAD_SIZE 514
 
 #define CANT_MAX_DATA 512
+
+#define MAX_RETRIES 3
 
 typedef struct
 {
@@ -49,17 +52,38 @@ void bind_socket(int sockfd, const char *puerto_str)
 
 int main(int argc, char *argv[])
 {
-    if (argc != 2)
+    if (argc != 3)
     {
-        fprintf(stderr, "Uso: %s <puerto>\n", argv[0]);
+        fprintf(stderr, "Uso: %s <puerto> <timeout_en_segundos>\n", argv[0]);
+        fprintf(stderr, "Ejemplo: %s 69 0.5    (para 500 ms)\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
     int socketfd = crear_socket();
-
     bind_socket(socketfd, argv[1]);
 
-    printf("Servidor TFTP escuchando en puerto %s …\n", argv[1]);
+    // Parsear el string argv[2] como número de segundos (puede tener decimales)
+    double timeout_sec = atof(argv[2]);
+    if (timeout_sec < 0)
+    {
+        fprintf(stderr, "Timeout inválido: %s\n", argv[2]);
+        close(socketfd);
+        exit(EXIT_FAILURE);
+    }
+
+    // Separar parte entera y parte fraccional en microsegundos
+    struct timeval tv;
+    tv.tv_sec = (int)timeout_sec;
+    tv.tv_usec = (int)((timeout_sec - tv.tv_sec) * 1e6);
+
+    if (setsockopt(socketfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
+    {
+        perror("setsockopt SO_RCVTIMEO");
+        close(socketfd);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Servidor TFTP escuchando en puerto %s (timeout = %.6f s)\n", argv[1], timeout_sec);
 
     // 3) Loop de recepción de paquetes
     while (1)
@@ -72,10 +96,10 @@ int main(int argc, char *argv[])
         ssize_t n = recvfrom(socketfd, &pkt, sizeof(pkt), 0, (struct sockaddr *)&client, &client_len);
         if (n < 0)
         {
-            perror("recvfrom");
+            // en este recv espera un RRQ o WRQ, entonces no tiene sentido imprimir que se le termino el timeout.
             continue;
-            ;
         }
+
         if (n < 2)
         { // mínimo debe traer 2 bytes para el opcode
             fprintf(stderr, "Paquete demasiado corto (%zd bytes)\n", n);
@@ -151,11 +175,36 @@ int main(int argc, char *argv[])
 
                 // Enviar el paquete
                 ssize_t total_len = 2 /*opcode*/ + 2 /*block*/ + leidos;
+
+                int retries = 0; // contador de reintentos por este bloque
+
+            reenvia_data: // label
+
                 sendto(socketfd, &data_pkt, total_len, 0, (struct sockaddr *)&client, client_len);
 
                 // Esperar ACK
                 tftp_packet_t ack_pkt;
                 ssize_t ack_len = recvfrom(socketfd, &ack_pkt, sizeof(ack_pkt), 0, (struct sockaddr *)&client, &client_len);
+
+                if (ack_len < 0)
+                {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    {
+                        // Timeout: aumentar contador y comprobar límite
+                        retries++;
+                        if (retries > MAX_RETRIES)
+                        {
+                            fprintf(stderr, "Máximo de %d reintentos alcanzado para bloque %u. Cerrando conexión.\n", MAX_RETRIES, bloque);
+                            fclose(fd);
+                            break;
+                        }
+                        fprintf(stderr, "Timeout esperando ACK %u (intento %d/%d), retransmito bloque %u\n", bloque, retries, MAX_RETRIES, bloque);
+                        goto reenvia_data;
+                    }
+                    perror("recvfrom (ACK)");
+                    break; // otro error real: abandonar este bloque
+                }
+
                 if (ack_len < 4 || ntohs(ack_pkt.opcode) != 4) // verifica que el paquete sea de minimo 4 bytes y que el opcde sea 4, o sea, un ACK
                 {
                     fprintf(stderr, "ACK inválido o error de recepción\n");
@@ -167,10 +216,16 @@ int main(int argc, char *argv[])
                 memcpy(&ack_block, ack_pkt.payload, 2);
                 ack_block = ntohs(ack_block);
 
-                if (ack_block != bloque)
+                if (ack_block > bloque)
                 {
                     fprintf(stderr, "ACK inesperado. Se esperaba %d, pero llegó %d\n", bloque, ack_block);
                     break;
+                }
+
+                if (ack_block < bloque)
+                {
+                    fprintf(stderr, "ACK viejo. Se esperaba %u, pero llegó %u. Se ignora y reenvía el bloque.\n", bloque, ack_block);
+                    goto reenvia_data;
                 }
 
                 bloque++;
@@ -246,7 +301,7 @@ int main(int argc, char *argv[])
                 uint16_t opcode = ntohs(pkt.opcode);
                 if (opcode != 3)
                 {
-                    fprintf(stderr, "Esperaba un paquete de DATA y recibió de otro tipo | opcode: %d\n", opcode);
+                    fprintf(stderr, "Esperaba un paquete de DATA y recibió de otro tipo. opcode: %d\n", opcode);
                     break;
                 }
 
@@ -254,10 +309,16 @@ int main(int argc, char *argv[])
 
                 block_number_received = ntohs(block_number_received);
 
-                if (block_number_received != block_number_expected)
+                if (block_number_received < block_number_expected)
                 {
-                    perror("block expected != block revcieved");
-                    exit(EXIT_FAILURE);
+                    perror("block expected < block revcieved. Ignorando");
+                    continue;
+                }
+
+                if (block_number_received > block_number_expected)
+                {
+                    perror("block expected > block revcieved. Abortando");
+                    break;
                 }
 
                 uint8_t data[CANT_MAX_DATA];
