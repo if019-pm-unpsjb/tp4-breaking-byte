@@ -87,9 +87,19 @@ if operacion == "WRITE":
         with open(filename, "rb") as f:
             # Esperar ACK de bloque 0, si llega entonces se comienza la transferencia
             ack_packet, server_address = sock.recvfrom(516)
+
+            if ack_packet[0:2] == b'\x00\x05':  # ERROR
+                error_code = int.from_bytes(ack_packet[2:4], byteorder='big')
+                error_msg = ack_packet[4:-1].decode()
+                print(f"Error del servidor: {error_msg} (Código {error_code})")
+                sys.exit(1) # Terminar el programa
+
             if ack_packet[0:2] != b'\x00\x04' or ack_packet[2:4] != b'\x00\x00':
                 print("Error: No se recibió ACK de bloque 0")
                 sys.exit(1)
+
+            if ack_packet[0:2] == b'\x00\x04' and ack_packet[2:4] == b'\x00\x00':
+                print("Se recibio el ACK 0")
 
             finish = False
             block_number = 1
