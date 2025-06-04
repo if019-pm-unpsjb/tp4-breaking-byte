@@ -34,6 +34,7 @@ request_packet = opcode + filename.encode() + b'\x00' + mode.encode() + b'\x00'
 
 # Envío de solicitud RRQ o WRQ por UDP
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(5)  # REFACTOR: ESPECIFICAR COMO PARAMETRO
 sock.sendto(request_packet, (ip, port))
 
 # Leer un archivo del servidor remoto y copiarlo en un archivo local
@@ -41,46 +42,51 @@ if operacion == "READ":
     finish = False
     file_created = False
     block_number_expected = 1
+    retry_limit = 3
+    retries = 0
 
     while not finish:
-        
-        data_packet, server_address = sock.recvfrom(516)  # opcode (2) + block (2) + data (≤512)
+        try:
+            data_packet, server_address = sock.recvfrom(516)  # opcode (2) + block (2) + data (≤512)
+            retries = 0  # Reiniciar el contador si se recibe algo
 
-        opcode = data_packet[0:2]
-        block_number = int.from_bytes(data_packet[2:4], byteorder='big')
-        data = data_packet[4:]
+            opcode = data_packet[0:2]
+            block_number = int.from_bytes(data_packet[2:4], byteorder='big')
+            data = data_packet[4:]
 
-        if opcode == b'\x00\x03':  # DATA
-            if block_number == block_number_expected:
+            if opcode == b'\x00\x03':  # DATA
+                if block_number == block_number_expected:
+                    if not file_created:
+                        local_file = open(filename, "wb")
+                        file_created = True
 
-                if (not file_created):
-                    local_file = open("_" + filename, "wb")  # Guardar archivo recibido
-                    file_created = True
+                    local_file.write(data)
 
-                local_file.write(data)
+                    # Enviar ACK
+                    ack_packet = b'\x00\x04' + block_number.to_bytes(2, byteorder='big')
+                    sock.sendto(ack_packet, server_address)
 
-                # Enviar ACK
-                ack_packet = b'\x00\x04' + block_number.to_bytes(2, byteorder='big')
-                sock.sendto(ack_packet, server_address)
+                    if len(data) < 512:
+                        finish = True
+                    else:
+                        block_number_expected = (block_number_expected + 1) & 0xFFFF
 
-                if len(data) < 512:
-                    finish = True
-                else:
-                    # Incrementar y envolver a 16 bits:
-                    block_number_expected = (block_number_expected + 1) & 0xFFFF
-            else:
-                # ACK duplicado en caso de reenvío del servidor
-                ack_packet = b'\x00\x04' + block_number.to_bytes(2, byteorder='big')
-                sock.sendto(ack_packet, server_address)
+            elif opcode == b'\x00\x05':  # ERROR
+                error_code = int.from_bytes(data_packet[2:4], byteorder='big')
+                error_msg = data_packet[4:-1].decode()
+                print(f"Error del servidor: {error_msg} (Código {error_code})")
+                sys.exit(1)
 
-        elif opcode == b'\x00\x05':  # ERROR
-            error_code = int.from_bytes(data_packet[2:4], byteorder='big')
-            error_msg = data_packet[4:-1].decode()
-            print(f"Error del servidor: {error_msg} (Código {error_code})")
-            sys.exit(1) # Terminar el programa
+        except socket.timeout:
+            retries += 1
+            print(f"Timeout {retries}/3: No se recibió respuesta del servidor.")
+            if retries >= retry_limit:
+                print("No se pudo recibir respuesta del servidor. Abortando transferencia.")
+                sys.exit(1)
 
-    local_file.close()
-    print(f"Archivo recibido como _{filename}")
+    if file_created:
+        local_file.close()
+        print(f"Archivo recibido como {filename}")
 
 # Escribir un archivo en el servidor remoto
 if operacion == "WRITE":
