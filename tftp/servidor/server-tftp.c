@@ -13,8 +13,6 @@
 #define CANT_MAX_DATA 512
 #define MAX_RETRIES 3
 
-
-
 typedef struct
 {
     uint16_t opcode; /* 2 bytes en network byte order */
