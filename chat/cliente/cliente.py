@@ -1,25 +1,41 @@
 import socket
+import argparse
+import threading
+import sys
 
-# Configuración del servidor
-IP_SERVIDOR = '127.0.0.1'  # Cambia esto por la IP real del servidor
-PUERTO_SERVIDOR = 6969    # Cambia esto por el puerto correcto
+# argumentos
+parser = argparse.ArgumentParser()
+parser.add_argument("usuario", help="Tu nombre de usuario")
+parser.add_argument("--host", default="127.0.0.1", help="IP del servidor")
+parser.add_argument("--port", type=int, default=6969, help="Puerto del servidor")
+args = parser.parse_args()
 
-# Crear el socket
+BUFFER_SIZE = 1024
 cliente = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+cliente.connect((args.host, args.port))
 
-try:
-    # Conectarse al servidor
-    cliente.connect((IP_SERVIDOR, PUERTO_SERVIDOR))
-    print(f"Conectado al servidor en {IP_SERVIDOR}:{PUERTO_SERVIDOR}")
+# enviar username
+cliente.sendall(args.usuario.encode('utf-8'))
 
-    # Enviar mensaje
-    mensaje = "hola"
-    cliente.sendall(mensaje.encode('utf-8'))
-    print(f"Mensaje enviado: {mensaje}")
+# funcion de recepción
+def recibir():
+    while True:
+        data = cliente.recv(BUFFER_SIZE)
+        if not data:
+            print("\n[Servidor cerró la conexión]")
+            sys.exit(0)
+        print("\n>> " + data.decode('utf-8') + "\n> ", end="", flush=True)
 
-except Exception as e:
-    print(f"Error al conectar o enviar: {e}")
+# arrancar hilo receptor
+threading.Thread(target=recibir, daemon=True).start()
 
-finally:
-    cliente.close()
-    print("Conexión cerrada")
+# bucle de envío
+print(f"Conectado como {args.usuario}. Escribí y enter para enviar.")
+while True:
+    msg = input("> ")
+    if msg.lower() in ("exit", "quit"):
+        break
+    cliente.sendall(msg.encode('utf-8'))
+
+cliente.close()
+print("Conexión cerrada")
