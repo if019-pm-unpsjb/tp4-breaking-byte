@@ -1,145 +1,140 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>     // close()
-#include <netinet/in.h> // sockaddr_in
-#include <sys/socket.h> // socket(), bind(), accept()
-#include <sys/select.h> // select()
+#include <unistd.h>
+#include <stdint.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/select.h>
 
 #define BUFFER_SIZE 1024
-#define MAX_CLIENTS 2
 #define NAME_LEN 32
+#define MAX_CLIENTS 100
+#define OPCODE_CONNECT 1
+#define OPCODE_SENDMSG 3
+#define OPCODE_ACK 7
 
-typedef struct
+int read_null_string(int fd, char *buf, int max_len)
 {
-    int sockfd;
-    char username[NAME_LEN];
-} client_t;
-
-int max(int a, int b) { return a > b ? a : b; }
+    int i = 0;
+    while (i < max_len)
+    {
+        char c;
+        if (read(fd, &c, 1) != 1)
+            return -1;
+        buf[i++] = c;
+        if (c == '\0')
+            return i;
+    }
+    return -2;
+}
 
 int main(int argc, char *argv[])
 {
     if (argc != 2)
-    {
-        fprintf(stderr, "Uso: %s <puerto>\n", argv[0]);
-        return EXIT_FAILURE;
-    }
+        exit(1);
     int port = atoi(argv[1]);
-    if (port <= 0)
-    {
-        fprintf(stderr, "Puerto inválido: %s\n", argv[1]);
-        return EXIT_FAILURE;
-    }
-
-    int server_fd, addrlen, new_sock, activity;
-    struct sockaddr_in address;
-    client_t clients[MAX_CLIENTS];
-    int client_count = 0;
-    char buffer[BUFFER_SIZE];
-
-    // 1) crear socket
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0)
-    {
-        perror("socket");
-        exit(EXIT_FAILURE);
-    }
-
-    // 2) bind
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(port);
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0)
-    {
-        perror("bind");
-        exit(EXIT_FAILURE);
-    }
-
-    // 3) listen
-    if (listen(server_fd, MAX_CLIENTS) < 0)
-    {
-        perror("listen");
-        exit(EXIT_FAILURE);
-    }
-    printf("Servidor escuchando en puerto %d …\n", port);
-
-    addrlen = sizeof(address);
-    // 4) aceptar exactamente 2 clientes
-    while (client_count < MAX_CLIENTS)
-    {
-        new_sock = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
-        if (new_sock < 0)
-        {
-            perror("accept");
-            continue;
-        }
-
-        // leer username
-        memset(buffer, 0, BUFFER_SIZE);
-        int rd = read(new_sock, buffer, BUFFER_SIZE - 1);
-        if (rd <= 0)
-        {
-            close(new_sock);
-            continue;
-        }
-        buffer[strcspn(buffer, "\r\n")] = 0;
-
-        // guardar cliente
-        clients[client_count].sockfd = new_sock;
-        strncpy(clients[client_count].username, buffer, NAME_LEN - 1);
-        printf("Cliente %d conectado: %s\n", client_count + 1, buffer);
-        client_count++;
-    }
-
-    // enviar bienvenida a cada uno
-    send(clients[0].sockfd,
-         clients[1].username,
-         strlen(clients[1].username) + 1,
-         0);
-    send(clients[1].sockfd,
-         clients[0].username,
-         strlen(clients[0].username) + 1,
-         0);
-
-    // 5) loop de reenvío de mensajes
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+    bind(server_fd, (struct sockaddr *)&addr, sizeof(addr));
+    listen(server_fd, MAX_CLIENTS);
+    int client_fds[MAX_CLIENTS] = {0};
+    char usernames[MAX_CLIENTS][NAME_LEN] = {{0}};
     fd_set readfds;
-    int max_fd = max(clients[0].sockfd, clients[1].sockfd);
-
     while (1)
     {
         FD_ZERO(&readfds);
-        FD_SET(clients[0].sockfd, &readfds);
-        FD_SET(clients[1].sockfd, &readfds);
-
-        activity = select(max_fd + 1, &readfds, NULL, NULL, NULL);
-        if (activity < 0)
-        {
-            perror("select");
-            break;
-        }
-
+        FD_SET(server_fd, &readfds);
+        int maxfd = server_fd;
         for (int i = 0; i < MAX_CLIENTS; i++)
         {
-            int sd = clients[i].sockfd;
-            if (FD_ISSET(sd, &readfds))
+            int fd = client_fds[i];
+            if (fd > 0)
             {
-                memset(buffer, 0, BUFFER_SIZE);
-                int len = read(sd, buffer, BUFFER_SIZE - 1);
-                if (len <= 0)
+                FD_SET(fd, &readfds);
+                if (fd > maxfd)
+                    maxfd = fd;
+            }
+        }
+        select(maxfd + 1, &readfds, NULL, NULL, NULL);
+        if (FD_ISSET(server_fd, &readfds))
+        {
+            int fd = accept(server_fd, NULL, NULL);
+            uint16_t op;
+            read(fd, &op, 2);
+            if (ntohs(op) == OPCODE_CONNECT)
+            {
+                char name[NAME_LEN];
+                if (read_null_string(fd, name, NAME_LEN - 1) > 0)
                 {
-                    printf("Cliente %s desconectado\n", clients[i].username);
-                    close(sd);
-                    // opcional: terminar todo o reajustar array
-                    exit(0);
+                    for (int i = 0; i < MAX_CLIENTS; i++)
+                    {
+                        if (client_fds[i] == 0)
+                        {
+                            client_fds[i] = fd;
+                            strncpy(usernames[i], name, NAME_LEN - 1);
+                            uint16_t ack[2] = {htons(OPCODE_ACK), htons(1)};
+                            send(fd, ack, 4, 0);
+                            break;
+                        }
+                    }
                 }
-                // reenviar al otro
-                int other = clients[i ^ 1].sockfd;
-                send(other, buffer, len, 0);
+                else
+                    close(fd);
+            }
+            else
+                close(fd);
+        }
+        for (int i = 0; i < MAX_CLIENTS; i++)
+        {
+            int fd = client_fds[i];
+            if (fd > 0 && FD_ISSET(fd, &readfds))
+            {
+                uint16_t op2;
+                if (read(fd, &op2, 2) <= 0)
+                {
+                    close(fd);
+                    client_fds[i] = 0;
+                    continue;
+                }
+                if (ntohs(op2) == OPCODE_SENDMSG)
+                {
+                    char orig[NAME_LEN], dest[NAME_LEN], msg[BUFFER_SIZE];
+                    if (read_null_string(fd, orig, NAME_LEN - 1) <= 0)
+                        continue;
+                    if (read_null_string(fd, dest, NAME_LEN - 1) <= 0)
+                        continue;
+                    if (read_null_string(fd, msg, BUFFER_SIZE - 1) <= 0)
+                        continue;
+                    for (int j = 0; j < MAX_CLIENTS; j++)
+                    {
+                        if (client_fds[j] > 0 && strcmp(usernames[j], dest) == 0)
+                        {
+                            unsigned char buf[BUFFER_SIZE];
+                            int off = 0;
+                            memcpy(buf + off, &op2, 2);
+                            off += 2;
+                            int l = strlen(orig) + 1;
+                            memcpy(buf + off, orig, l);
+                            off += l;
+                            l = strlen(dest) + 1;
+                            memcpy(buf + off, dest, l);
+                            off += l;
+                            l = strlen(msg) + 1;
+                            memcpy(buf + off, msg, l);
+                            off += l;
+                            send(client_fds[j], buf, off, 0);
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
-
-    close(server_fd);
     return 0;
 }
