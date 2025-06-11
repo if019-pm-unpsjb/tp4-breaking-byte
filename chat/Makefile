@@ -9,7 +9,7 @@ all: $(PROGS)
 
 LIST=$(addprefix $(BIN)/, $(PROGS))
 
-server-chat: server-chat.c 
+server-chat: servidor/server-chat.c 
 	$(CC) -o bin/$@ $^ $(CFLAGS)
 
 .PHONY: clean
