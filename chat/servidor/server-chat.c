@@ -14,13 +14,16 @@
 
 #define OPCODE_CONNECT 1
 #define OPCODE_SENDMSG 3
-#define OPCODE_ACK 7
-#define USER_SUCCESFULLY_CONNECTED_ACK_CODE 1
 #define OPCODE_ERROR 6
-#define DUPLICATE_USERNAME_ERROR_CODE 2
+#define OPCODE_ACK 7
 #define OPCODE_USER_EVENT 8
-#define ACTION_CONNECT 0
-#define ACTION_DISCONNECT 1
+
+#define USER_EVENT_CONNECT 0
+#define USER_EVENT_DISCONNECT 1
+
+#define ACK_CODE_USER_CONNECTED 1
+#define ERROR_TOO_LONG_NAME 1
+#define ERROR_DUPLICATE_NAME 2
 
 typedef struct
 {
@@ -32,36 +35,21 @@ static client_t clients[MAX_CLIENTS];
 static pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int next_thread_id = 1;
 
-// lee hasta '\0'
-int read_null_string(int fd, char *buf, int max_len)
+// envía paquete user_event: [opcode][size][action][username\0]
+static void send_user_event(int sockfd, uint16_t action, const char *username)
 {
-    int i = 0;
-    while (i < max_len)
-    {
-        if (read(fd, &buf[i], 1) != 1)
-            return -1;
-        if (buf[i++] == '\0')
-            return i;
-    }
-    return -2;
+    uint16_t username_len = strlen(username);
+    uint16_t hdr[3] = {htons(OPCODE_USER_EVENT), htons(2 + username_len), htons(action)};
+    unsigned char buf[6 + NAME_LEN];
+    memcpy(buf, hdr, 6);
+    memcpy(buf + 6, username, username_len);
+    send(sockfd, buf, 6 + username_len, 0);
 }
 
-// envía paquete user_event a un socket dado
-void send_user_event(int sockfd, uint16_t action, const char *username)
-{
-    uint16_t hdr[2] = {htons(OPCODE_USER_EVENT), htons(action)};
-    int ulen = strlen(username) + 1;
-    unsigned char buf[4 + NAME_LEN + 1];
-    memcpy(buf, hdr, 4);
-    memcpy(buf + 4, username, ulen);
-    send(sockfd, buf, 4 + ulen, 0);
-}
-
-// notifica a todos excepto idx_exclude
-void broadcast_user_event(uint16_t action, const char *username, int idx_exclude)
+// notifica a todos menos idx_exclude
+static void broadcast_user_event(uint16_t action, const char *username, int idx_exclude)
 {
     pthread_mutex_lock(&clients_mutex);
-
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
         if (i != idx_exclude && clients[i].sockfd > 0)
@@ -72,7 +60,7 @@ void broadcast_user_event(uint16_t action, const char *username, int idx_exclude
     pthread_mutex_unlock(&clients_mutex);
 }
 
-void *client_thread(void *arg)
+static void *client_thread(void *arg)
 {
     int idx = *(int *)arg;
     free(arg);
@@ -85,61 +73,65 @@ void *client_thread(void *arg)
 
     printf("Thread[%d]: handling '%s' fd=%d\n", thread_id, name, fd);
 
-    // loop de mensajes
     while (1)
     {
-        uint16_t net_op;
-        if (read(fd, &net_op, 2) <= 0)
+        uint16_t net_op, net_size;
+        if (read(fd, &net_op, 2) != 2)
             break;
-        if (ntohs(net_op) != OPCODE_SENDMSG)
-            continue;
-
-        char orig[NAME_LEN] = {0}, dest[NAME_LEN] = {0}, msg[BUFFER_SIZE] = {0};
-        if (read_null_string(fd, orig, NAME_LEN - 1) <= 0)
-            break;
-        if (read_null_string(fd, dest, NAME_LEN - 1) <= 0)
-            break;
-        if (read_null_string(fd, msg, BUFFER_SIZE - 1) <= 0)
+        if (read(fd, &net_size, 2) != 2)
             break;
 
-        printf("Thread[%d]: %s -> %s : %s\n", thread_id, orig, dest, msg);
+        int opcode = ntohs(net_op);
+        int size = ntohs(net_size);
+        if (size < 0 || size > BUFFER_SIZE)
+            break;
 
-        pthread_mutex_lock(&clients_mutex);
-        // reenviar a destinatario
-        for (int j = 0; j < MAX_CLIENTS; j++)
+        unsigned char payload[BUFFER_SIZE + 1];
+        if (read(fd, payload, size) != size)
+            break;
+        payload[size] = '\0';
+
+        if (opcode == OPCODE_SENDMSG)
         {
-            if (clients[j].sockfd > 0 && strcmp(clients[j].username, dest) == 0)
+            char *orig = (char *)payload;
+            char *dest = orig + strlen(orig) + 1;
+            char *msg = dest + strlen(dest) + 1;
+            printf("Thread[%d]: %s -> %s : %s\n", thread_id, orig, dest, msg);
+
+            int plen = strlen(orig) + 1 + strlen(dest) + 1 + strlen(msg) + 1;
+            uint16_t out_hdr[2] = {htons(OPCODE_SENDMSG), htons(plen)};
+            unsigned char outbuf[4 + BUFFER_SIZE];
+            int off = 0;
+            memcpy(outbuf + off, out_hdr, 4);
+            off += 4;
+            memcpy(outbuf + off, orig, strlen(orig) + 1);
+            off += strlen(orig) + 1;
+            memcpy(outbuf + off, dest, strlen(dest) + 1);
+            off += strlen(dest) + 1;
+            memcpy(outbuf + off, msg, strlen(msg) + 1);
+            off += strlen(msg) + 1;
+
+            pthread_mutex_lock(&clients_mutex);
+            for (int j = 0; j < MAX_CLIENTS; j++)
             {
-                unsigned char buf[BUFFER_SIZE];
-                int off = 0;
-                memcpy(buf + off, &net_op, 2);
-                off += 2;
-                int l = strlen(orig) + 1;
-                memcpy(buf + off, orig, l);
-                off += l;
-                l = strlen(dest) + 1;
-                memcpy(buf + off, dest, l);
-                off += l;
-                l = strlen(msg) + 1;
-                memcpy(buf + off, msg, l);
-                off += l;
-                send(clients[j].sockfd, buf, off, 0);
-                printf("Thread[%d]: forwarded to '%s' fd=%d %d bytes\n",
-                       thread_id, dest, clients[j].sockfd, off);
-                break;
+                if (clients[j].sockfd > 0 &&
+                    strcmp(clients[j].username, dest) == 0)
+                {
+                    send(clients[j].sockfd, outbuf, off, 0);
+                    printf("Thread[%d]: forwarded to '%s' fd=%d (%d bytes)\n",
+                           thread_id, dest, clients[j].sockfd, off);
+                    break;
+                }
             }
+            pthread_mutex_unlock(&clients_mutex);
         }
-        pthread_mutex_unlock(&clients_mutex);
     }
 
-    // desconexión
     pthread_mutex_lock(&clients_mutex);
     clients[idx].sockfd = 0;
     clients[idx].username[0] = '\0';
     pthread_mutex_unlock(&clients_mutex);
-
-    // notificar a todos de desconexión
-    broadcast_user_event(ACTION_DISCONNECT, name, idx);
+    broadcast_user_event(USER_EVENT_DISCONNECT, name, idx);
 
     close(fd);
     printf("Thread[%d]: '%s' disconnected\n", thread_id, name);
@@ -156,10 +148,10 @@ int main(int argc, char *argv[])
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_addr.s_addr = INADDR_ANY,
+        .sin_port = htons(port)};
     bind(server_fd, (struct sockaddr *)&addr, sizeof(addr));
     listen(server_fd, MAX_CLIENTS);
 
@@ -172,15 +164,33 @@ int main(int argc, char *argv[])
             continue;
         printf("Server: accepted fd=%d\n", client_fd);
 
-        // connect_request
-        uint16_t net_op;
-        if (read(client_fd, &net_op, 2) != 2 || ntohs(net_op) != OPCODE_CONNECT)
+        uint16_t net_op, net_size;
+        if (read(client_fd, &net_op, 2) != 2 ||
+            read(client_fd, &net_size, 2) != 2)
         {
             close(client_fd);
             continue;
         }
-        char name[NAME_LEN] = {0};
-        if (read_null_string(client_fd, name, NAME_LEN - 1) <= 0)
+        if (ntohs(net_op) != OPCODE_CONNECT)
+        {
+            close(client_fd);
+            continue;
+        }
+
+        int size = ntohs(net_size);
+        if (size < 1 || size > NAME_LEN)
+        {
+            uint16_t err[2] = {htons(OPCODE_ERROR),
+                               htons(ERROR_TOO_LONG_NAME)};
+            const char *txt = "Nombre de usuario excede límite de caracteres";
+            send(client_fd, err, 4, 0);
+            send(client_fd, txt, strlen(txt) + 1, 0);
+            close(client_fd);
+            continue;
+        }
+
+        char name[NAME_LEN];
+        if (read(client_fd, name, size) != size)
         {
             close(client_fd);
             continue;
@@ -188,29 +198,28 @@ int main(int argc, char *argv[])
         printf("Server: connect_request '%s' fd=%d\n", name, client_fd);
 
         pthread_mutex_lock(&clients_mutex);
-        // duplicate check
-        int duplicate = 0;
-        for (int j = 0; j < MAX_CLIENTS; j++)
+        int dup = 0;
+        for (int i = 0; i < MAX_CLIENTS; i++)
         {
-            if (clients[j].sockfd > 0 && strcmp(clients[j].username, name) == 0)
+            if (clients[i].sockfd > 0 &&
+                strcmp(clients[i].username, name) == 0)
             {
-                duplicate = 1;
+                dup = 1;
                 break;
             }
         }
-        if (duplicate)
+        if (dup)
         {
-            uint16_t err_hdr[2] = {htons(OPCODE_ERROR), htons(DUPLICATE_USERNAME_ERROR_CODE)};
-            const char *err_txt = "Username taken";
-            send(client_fd, err_hdr, 4, 0);
-            send(client_fd, err_txt, strlen(err_txt) + 1, 0);
-            close(client_fd);
-            printf("Server: duplicate username '%s', rejected\n", name);
+            uint16_t err[2] = {htons(OPCODE_ERROR),
+                               htons(ERROR_DUPLICATE_NAME)};
+            const char *txt = "Ya hay un usuario conectado con el mismo nombre";
+            send(client_fd, err, 4, 0);
+            send(client_fd, txt, strlen(txt) + 1, 0);
             pthread_mutex_unlock(&clients_mutex);
+            close(client_fd);
             continue;
         }
 
-        // find free slot
         int idx = -1;
         for (int i = 0; i < MAX_CLIENTS; i++)
         {
@@ -222,41 +231,38 @@ int main(int argc, char *argv[])
         }
         if (idx < 0)
         {
-            close(client_fd);
             pthread_mutex_unlock(&clients_mutex);
+            close(client_fd);
             continue;
         }
 
-        // registrar cliente
         clients[idx].sockfd = client_fd;
         strncpy(clients[idx].username, name, NAME_LEN - 1);
+        pthread_mutex_unlock(&clients_mutex);
 
-        // enviar lista de usuarios existentes
+        // enviar lista previa
+        pthread_mutex_lock(&clients_mutex);
         for (int k = 0; k < MAX_CLIENTS; k++)
         {
             if (clients[k].sockfd > 0 && k != idx)
             {
-                send_user_event(client_fd, ACTION_CONNECT, clients[k].username);
+                send_user_event(client_fd, USER_EVENT_CONNECT, clients[k].username);
             }
         }
-
         pthread_mutex_unlock(&clients_mutex);
 
-        // notificar a todos el nuevo usuario
-        broadcast_user_event(ACTION_CONNECT, name, idx);
+        broadcast_user_event(USER_EVENT_CONNECT, name, idx);
 
-        // send ACK
-        uint16_t ack_msg[2] = {htons(OPCODE_ACK), htons(USER_SUCCESFULLY_CONNECTED_ACK_CODE)};
-        send(client_fd, ack_msg, sizeof(ack_msg), 0);
+        uint16_t ack[2] = {htons(OPCODE_ACK),
+                           htons(ACK_CODE_USER_CONNECTED)};
+        send(client_fd, ack, 4, 0);
         printf("Server: ACK sent to '%s' fd=%d\n", name, client_fd);
 
-        // spawn thread
         pthread_t tid;
         int *pidx = malloc(sizeof(int));
         *pidx = idx;
         pthread_create(&tid, NULL, client_thread, pidx);
         pthread_detach(tid);
-        printf("Server: thread %d created for '%s' idx=%d\n", next_thread_id - 1, name, idx);
     }
 
     return 0;
