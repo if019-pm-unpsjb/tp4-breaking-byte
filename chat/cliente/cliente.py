@@ -27,6 +27,7 @@ cliente.connect((HOST, PORT))
 usuarios_conectados = []  # lista actualizada desde el servidor
 mensajes_por_usuario = {}
 usuario_seleccionado = None
+notificaciones_pendientes = {}
 
 # === Funciones de protocolo ===
 def formatear_string(s, length):
@@ -159,6 +160,9 @@ def interpretar_mensaje(opcode, payload):
         mensajes_por_usuario.setdefault(remitente, []).append(f"{remitente}: {mensaje}")
         if remitente == usuario_seleccionado:
             actualizar_chat()
+        else:
+            notificaciones_pendientes[remitente] = True
+            actualizar_lista_usuarios()
 
     elif opcode == 8:  # notificación de conexión/desconexión
         try:
@@ -177,6 +181,7 @@ def interpretar_mensaje(opcode, payload):
                 if usuario not in usuarios_conectados:
                     usuarios_conectados.append(usuario)
                     mensajes_por_usuario.setdefault(usuario, [])
+                    notificaciones_pendientes[usuario] = False
                     actualizar_lista_usuarios()
 
             elif accion == 1:  # desconexión
@@ -210,8 +215,11 @@ def seleccionar_usuario(evt):
     seleccion = lista_usuarios.curselection()
     if not seleccion:
         return
-    usuario = lista_usuarios.get(seleccion[0])
+    visual = lista_usuarios.get(seleccion[0])
+    usuario = visual.replace("🔵 ", "")
     usuario_seleccionado = usuario
+    notificaciones_pendientes[usuario] = False
+    actualizar_lista_usuarios()
     actualizar_chat()
     input_mensaje.focus_set()
 
@@ -231,10 +239,22 @@ def limpiar_chat():
     area_chat.config(state='disabled')
 
 def actualizar_lista_usuarios():
+    seleccion_actual = usuario_seleccionado  # 👈 recordar la selección real
     lista_usuarios.delete(0, tk.END)
+
+    nombres_visibles = []
     for usuario in sorted(usuarios_conectados):
         if usuario != MI_USUARIO:
-            lista_usuarios.insert(tk.END, usuario)
+            label = f"🔵 {usuario}" if notificaciones_pendientes.get(usuario, False) else usuario
+            nombres_visibles.append(label)
+            lista_usuarios.insert(tk.END, label)
+
+    # 🔧 Volver a aplicar la selección visual si corresponde
+    if seleccion_actual:
+        for i, nombre in enumerate(nombres_visibles):
+            if nombre.replace("🔵 ", "") == seleccion_actual:
+                lista_usuarios.selection_set(i)
+                break
 
 # === Ventana principal ===
 ventana = tk.Tk()
