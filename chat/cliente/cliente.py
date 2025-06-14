@@ -36,7 +36,7 @@ def formatear_string(s, length):
     return b
 
 def cerrar_conexion(mensaje):
-    enviar_trama_desconexion()
+    #enviar_trama_desconexion()
     messagebox.showerror("Conexión finalizada", mensaje)
     try:
         cliente.close()
@@ -46,16 +46,52 @@ def cerrar_conexion(mensaje):
 
 def construir_trama_conexion(usuario):
     opcode = 1
-    return struct.pack('!H', opcode) + formatear_string(usuario, MAX_USERNAME_LEN) + b'\x00'
+    payload = usuario.encode('utf-8') + b'\x00'
+    size = len(payload)
+    return struct.pack('!HH', opcode, size) + payload
 
 def construir_trama_sendmsg(remitente, destinatario, mensaje):
     opcode = 3
-    return (
-        struct.pack('!H', opcode) +
+    payload = (
         formatear_string(remitente, MAX_USERNAME_LEN) + b'\x00' +
         formatear_string(destinatario, MAX_USERNAME_LEN) + b'\x00' +
         mensaje.encode("utf-8") + b'\x00'
     )
+    size = len(payload)
+    return struct.pack('!HH', opcode, size) + payload
+
+def recibir_bytes(sock, n):
+    datos = b''
+    while len(datos) < n:
+        parte = sock.recv(n - len(datos))
+        if not parte:
+            return None
+        datos += parte
+    return datos
+
+def recibir_trama_completa(sock):
+    # Leer 2 bytes: opcode
+    opcode_bytes = recibir_bytes(sock, 2)
+    if not opcode_bytes:
+        return None
+    opcode = struct.unpack('!H', opcode_bytes)[0]
+
+    if opcode == 7:  # ACK: opcode (2) + ack_code (2)
+        ack_code_bytes = recibir_bytes(sock, 2)
+        if not ack_code_bytes:
+            return None
+        payload = ack_code_bytes  # payload son solo los 2 bytes del ack_code
+        return opcode, payload
+    else:
+        # Leer los siguientes 2 bytes como size
+        size_bytes = recibir_bytes(sock, 2)
+        if not size_bytes:
+            return None
+        size = struct.unpack('!H', size_bytes)[0]
+        payload = recibir_bytes(sock, size)
+        if payload is None:
+            return None
+        return opcode, payload
 
 # === Enviar mensaje ===
 def enviar_mensaje():
@@ -88,66 +124,85 @@ def enviar_trama_desconexion():
 def recibir():
     while True:
         try:
-            data = cliente.recv(BUFFER_SIZE)
-            if not data:
+            trama = recibir_trama_completa(cliente)
+            if trama is None:
                 cerrar_conexion("El servidor cerró la conexión.")
                 break
-            interpretar_mensaje(data)
+            opcode, payload = trama
+            interpretar_mensaje(opcode, payload)
         except ConnectionResetError:
             cerrar_conexion("Conexión perdida con el servidor.")
             break
         except OSError:
             break
 
-def interpretar_mensaje(data):
+def interpretar_mensaje(opcode, payload):
     global usuario_seleccionado
-    if len(data) < 2:
-        return
-    opcode = struct.unpack('!H', data[:2])[0]
+
+    OPCODE_ACK = 7
+    ACK_CODE_USER_CONNECTED = 1
 
     if opcode == 3:  # mensaje
-        offset = 2
-        fin_rem = data.find(b'\x00', offset)
-        remitente = data[offset:fin_rem].decode()
+        # payload: remitente\0 destinatario\0 mensaje\0
+        offset = 0
+        fin_rem = payload.find(b'\x00', offset)
+        remitente = payload[offset:fin_rem].decode()
         offset = fin_rem + 1
 
-        fin_dest = data.find(b'\x00', offset)
-        destinatario = data[offset:fin_dest].decode()
+        fin_dest = payload.find(b'\x00', offset)
+        destinatario = payload[offset:fin_dest].decode()
         offset = fin_dest + 1
 
-        fin_mensaje = data.find(b'\x00', offset)
-        mensaje = data[offset:fin_mensaje].decode()
+        fin_mensaje = payload.find(b'\x00', offset)
+        mensaje = payload[offset:fin_mensaje].decode()
 
         mensajes_por_usuario.setdefault(remitente, []).append(f"{remitente}: {mensaje}")
         if remitente == usuario_seleccionado:
             actualizar_chat()
 
     elif opcode == 8:  # notificación de conexión/desconexión
-        if len(data) < 5:
-            return
-        accion = struct.unpack('!H', data[2:4])[0]
-        offset = 4
-        fin_usuario = data.find(b'\x00', offset)
-        if fin_usuario == -1:
-            return
-        usuario = data[offset:fin_usuario].decode()
+        try:
+            if len(payload) < 3:
+                print("[WARN] Payload demasiado corto")
+                return
 
-        if usuario == MI_USUARIO:
-            return  # ignorar si soy yo
+            accion = struct.unpack('!H', payload[:2])[0]
+            usuario = payload[2:].decode('utf-8')
 
-        if accion == 0:  # conexión
-            if usuario not in usuarios_conectados:
-                usuarios_conectados.append(usuario)
-                mensajes_por_usuario.setdefault(usuario, [])
-                actualizar_lista_usuarios()
-        elif accion == 1:  # desconexión
-            if usuario in usuarios_conectados:
-                usuarios_conectados.remove(usuario)
-                mensajes_por_usuario.pop(usuario, None)
-                if usuario == usuario_seleccionado:
-                    limpiar_chat()
-                    usuario_seleccionado = None
-                actualizar_lista_usuarios()
+            if usuario == MI_USUARIO:
+                return  # ignorar si soy yo
+
+            if accion == 0:  # conexión
+                print(f"[INFO] Usuario conectado: {usuario}")
+                if usuario not in usuarios_conectados:
+                    usuarios_conectados.append(usuario)
+                    mensajes_por_usuario.setdefault(usuario, [])
+                    actualizar_lista_usuarios()
+
+            elif accion == 1:  # desconexión
+                print(f"[INFO] Usuario desconectado: {usuario}")
+                if usuario in usuarios_conectados:
+                    usuarios_conectados.remove(usuario)
+                    mensajes_por_usuario.pop(usuario, None)
+                    if usuario == usuario_seleccionado:
+                        limpiar_chat()
+                        usuario_seleccionado = None
+                    actualizar_lista_usuarios()
+            else:
+                print(f"[WARN] Acción desconocida en opcode 8: {accion}")
+        except Exception as e:
+            print(f"[ERROR] Al interpretar USER_EVENT: {e}")
+
+    elif opcode == OPCODE_ACK:  # ACK
+        if len(payload) != 2:
+            cerrar_conexion("ACK inválido: tamaño incorrecto")
+            return
+        ack_code = struct.unpack('!H', payload)[0]
+        if ack_code == ACK_CODE_USER_CONNECTED:
+            print("Conexión aceptada por el servidor.")
+            # Aquí podrías actualizar algún estado si necesitas
+        else:
+            cerrar_conexion(f"ACK inválido: código {ack_code}")
 
 # === GUI ===
 def seleccionar_usuario(evt):
