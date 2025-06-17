@@ -2,8 +2,9 @@ import socket
 import struct
 import threading
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, filedialog
 import argparse
+import os
 
 # === Configuración general ===
 MAX_USERNAME_LEN = 32
@@ -23,11 +24,19 @@ MI_USUARIO = args.user
 cliente = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 cliente.connect((HOST, PORT))
 
+# VARIABLE GLOBAL TEMPORAL
+archivo_seleccionado = None
+
 # === Estado dinámico ===
 usuarios_conectados = []  # lista actualizada desde el servidor
 mensajes_por_usuario = {}
 usuario_seleccionado = None
 notificaciones_pendientes = {}
+# file handling
+archivo_en_recepcion = None
+archivo_actual_nombre = None
+archivo_actual_tamano = 0
+archivo_actual_bytes_recibidos = 0
 
 # === Funciones de protocolo ===
 def formatear_string(s, length):
@@ -60,6 +69,50 @@ def construir_trama_sendmsg(remitente, destinatario, mensaje):
     )
     size = len(payload)
     return struct.pack('!HH', opcode, size) + payload
+
+def construir_trama_sendfile(usuario_origen, usuario_destino, filepath):
+    import os
+    opcode = 4
+    accion = 0  # FILE_SEND_REQ
+
+    # Usuario origen
+    origen_bytes = formatear_string(usuario_origen, MAX_USERNAME_LEN) + b'\x00'
+
+    # Usuario destino
+    destino_bytes = formatear_string(usuario_destino, MAX_USERNAME_LEN) + b'\x00'
+
+    # Tamaño del archivo
+    try:
+        file_size = os.path.getsize(filepath)
+    except Exception as e:
+        messagebox.showerror("Error", f"No se pudo obtener el tamaño del archivo: {e}")
+        return None
+
+    file_size_bytes = struct.pack('!I', file_size) + b'\x00'  # 4 bytes + null terminador
+
+    # Nombre del archivo
+    nombre_archivo = os.path.basename(filepath)
+    nombre_bytes = nombre_archivo.encode("utf-8")
+    if len(nombre_bytes) > 951:
+        messagebox.showerror("Error", "El nombre del archivo es demasiado largo")
+        return None
+
+    # Construcción del payload
+    payload = origen_bytes + destino_bytes + file_size_bytes + nombre_bytes
+
+    # Nuevo campo `accion`
+    accion_bytes = struct.pack('!H', accion)
+
+    # Size: tamaño del payload + 2 bytes del campo `accion`
+    size = len(payload) + len(accion_bytes)
+
+    # Trama final
+    trama = struct.pack('!HH', opcode, size) + accion_bytes + payload
+
+    print(f"[DEBUG] Trama SEND FILE construida ({len(trama)} bytes):")
+    print(' '.join(f'{b:02x}' for b in trama))
+
+    return trama
 
 def recibir_bytes(sock, n):
     datos = b''
@@ -164,6 +217,23 @@ def interpretar_mensaje(opcode, payload):
             notificaciones_pendientes[remitente] = True
             actualizar_lista_usuarios()
 
+    elif opcode == 4:  # SENDFILE
+        procesar_trama_sendfile(payload, cliente)
+    
+    elif opcode == 5:
+        procesar_trama_filedata(payload)
+    
+    elif opcode == OPCODE_ACK:  # ACK
+        if len(payload) != 2:
+            cerrar_conexion("ACK inválido: tamaño incorrecto")
+            return
+        ack_code = struct.unpack('!H', payload)[0]
+        if ack_code == ACK_CODE_USER_CONNECTED:
+            print("Conexión aceptada por el servidor.")
+            # Aquí podrías actualizar algún estado si necesitas
+        else:
+            cerrar_conexion(f"ACK inválido: código {ack_code}")
+
     elif opcode == 8:  # notificación de conexión/desconexión
         try:
             if len(payload) < 3:
@@ -198,16 +268,149 @@ def interpretar_mensaje(opcode, payload):
         except Exception as e:
             print(f"[ERROR] Al interpretar USER_EVENT: {e}")
 
-    elif opcode == OPCODE_ACK:  # ACK
-        if len(payload) != 2:
-            cerrar_conexion("ACK inválido: tamaño incorrecto")
+def procesar_trama_filedata(payload):
+    global archivo_en_recepcion, archivo_actual_bytes_recibidos, archivo_actual_tamano
+
+    try:
+        offset = 0
+
+        # Origen
+        end_origen = payload.find(b'\x00', offset)
+        if end_origen == -1:
+            print("[ERROR] No se encontró fin de origen en FILEDATA")
             return
-        ack_code = struct.unpack('!H', payload)[0]
-        if ack_code == ACK_CODE_USER_CONNECTED:
-            print("Conexión aceptada por el servidor.")
-            # Aquí podrías actualizar algún estado si necesitas
+        origen = payload[offset:end_origen].decode()
+        offset = end_origen + 1
+
+        # Destino
+        end_destino = payload.find(b'\x00', offset)
+        if end_destino == -1:
+            print("[ERROR] No se encontró fin de destino en FILEDATA")
+            return
+        destino = payload[offset:end_destino].decode()
+        offset = end_destino + 1
+
+        # Data
+        data = payload[offset:]
+        if not data:
+            print("[WARN] Trama FILEDATA sin datos.")
+            return
+
+        if archivo_en_recepcion is None:
+            print("[ERROR] No hay archivo abierto para recibir datos.")
+            return
+
+        archivo_en_recepcion.write(data)
+        archivo_actual_bytes_recibidos += len(data)
+        print(f"[INFO] Recibidos {archivo_actual_bytes_recibidos}/{archivo_actual_tamano} bytes")
+
+        # Si ya recibimos todo, cerramos
+        if archivo_actual_bytes_recibidos >= archivo_actual_tamano:
+            archivo_en_recepcion.close()
+            print(f"[INFO] Archivo recibido y guardado como '{archivo_actual_nombre}'")
+            archivo_en_recepcion = None
+
+    except Exception as e:
+        print(f"[ERROR] Al procesar FILEDATA: {e}")
+
+def procesar_trama_sendfile(payload, sock):
+    global archivo_actual_nombre, archivo_actual_tamano, archivo_actual_bytes_recibidos, archivo_en_recepcion 
+    try:
+        offset = 0
+
+        # === Leer acción (2 bytes) ===
+        if len(payload) < 2:
+            raise ValueError("Payload muy corto para campo 'accion'")
+        accion = struct.unpack('!H', payload[offset:offset+2])[0]
+        offset += 2
+
+        # === Usuario origen ===
+        end_origen = payload.find(b'\x00', offset)
+        if end_origen == -1:
+            raise ValueError("No se encontró fin de usuario origen")
+        origen = payload[offset:end_origen].decode()
+        offset = end_origen + 1
+
+        # === Usuario destino ===
+        end_destino = payload.find(b'\x00', offset)
+        if end_destino == -1:
+            raise ValueError("No se encontró fin de usuario destino")
+        destino = payload[offset:end_destino].decode()
+        offset = end_destino + 1
+
+        # === Tamaño del archivo (4 bytes + \0) ===
+        if len(payload) < offset + 5:
+            raise ValueError("Payload muy corto para tamaño del archivo")
+        file_size = struct.unpack('!I', payload[offset:offset+4])[0]
+        offset += 5
+
+        # === Nombre del archivo ===
+        nombre_archivo = payload[offset:].decode(errors='ignore')
+
+        print(f"[INFO] SENDFILE recibido (acción = {accion}) de {origen} para {destino}")
+        print(f"Archivo: {nombre_archivo} ({file_size} bytes)")
+
+        if accion == 0:
+            # === Enviar respuesta con accion = 1 (READY_TO_RECV_FILE) ===
+            accion_resp = 1
+            opcode = 4
+
+            # Intercambiamos origen y destino para responder
+            origen_resp = destino
+            destino_resp = origen
+
+            payload_resp = struct.pack('!H', accion_resp)
+            payload_resp += origen_resp.encode('utf-8') + b'\x00'
+            payload_resp += destino_resp.encode('utf-8') + b'\x00'
+            payload_resp += struct.pack('!I', file_size) + b'\x00'
+            payload_resp += nombre_archivo.encode('utf-8')
+
+            size_resp = len(payload_resp)
+            trama = struct.pack('!HH', opcode, size_resp) + payload_resp
+
+            archivo_actual_nombre = nombre_archivo
+            archivo_actual_tamano = file_size
+            archivo_actual_bytes_recibidos = 0
+            print(f"NOMBRE ARCHIVOOOOOOOOO: '{nombre_archivo}'")
+            archivo_en_recepcion = open(nombre_archivo, "wb")
+
+            sock.sendall(trama)
+            print(f"[INFO] Trama SENDFILE (accion=1) enviada de '{origen_resp}' a '{destino_resp}'")
+        
+        elif accion == 1:
+            print(f"[INFO] SENDFILE (acción=1, FILE_READY_TO_RECV) recibido de '{origen}' para '{destino}'")
+            print(f"Archivo: {nombre_archivo} ({file_size} bytes)")
+            enviar_tramas_filedata(destino, origen, nombre_archivo, file_size, sock) # se invierte origen y destino
+
         else:
-            cerrar_conexion(f"ACK inválido: código {ack_code}")
+            print(f"[WARN] Acción {accion} no reconocida todavía")
+
+    except Exception as e:
+        print(f"[ERROR] Al procesar SENDFILE: {e}")
+
+def enviar_tramas_filedata(origen, destino, nombre_archivo, file_size, sock):
+    try:
+        with open(nombre_archivo, "rb") as f:
+            while True:
+                data = f.read(953)  # máximo 953 bytes de datos reales
+                if not data:
+                    break
+
+                # Construir trama
+                opcode = 5  # FILEDATA
+                origen_bytes = origen.encode("utf-8") + b'\x00'
+                destino_bytes = destino.encode("utf-8") + b'\x00'
+                payload = origen_bytes + destino_bytes + data
+                size = len(payload)
+                trama = struct.pack('!HH', opcode, size) + payload
+
+                sock.sendall(trama)
+                print(f"[INFO] Trama FILEDATA enviada ({len(data)} bytes)")
+
+        print("[INFO] Transferencia completa.")
+
+    except Exception as e:
+        print(f"[ERROR] Al enviar archivo: {e}")
 
 # === GUI ===
 def seleccionar_usuario(evt):
@@ -222,6 +425,33 @@ def seleccionar_usuario(evt):
     actualizar_lista_usuarios()
     actualizar_chat()
     input_mensaje.focus_set()
+
+def seleccionar_archivo():
+    global archivo_seleccionado
+    ruta = filedialog.askopenfilename(title="Selecciona un archivo para enviar")
+    if ruta:
+        archivo_seleccionado = ruta
+        messagebox.showinfo("Archivo seleccionado", f"Archivo: {ruta.split('/')[-1]}")
+
+def enviar_archivo():
+    global archivo_seleccionado
+    if not archivo_seleccionado:
+        messagebox.showwarning("Archivo no seleccionado", "Primero selecciona un archivo")
+        return
+    if not usuario_seleccionado:
+        messagebox.showwarning("Usuario no seleccionado", "Primero selecciona un usuario destino")
+        return
+
+    trama = construir_trama_sendfile(MI_USUARIO, usuario_seleccionado, archivo_seleccionado)
+    if trama is None:
+        return
+
+    try:
+        cliente.sendall(trama)
+        print("[INFO] Trama 'send file' enviada correctamente")
+        # Esperar ACK para luego empezar transferencia real
+    except Exception as e:
+        messagebox.showerror("Error de envío", f"No se pudo enviar la trama: {e}")
 
 def actualizar_chat():
     area_chat.config(state='normal')
@@ -282,8 +512,14 @@ input_mensaje = tk.Entry(frame_input)
 input_mensaje.pack(side=tk.LEFT, fill=tk.X, expand=True)
 input_mensaje.bind("<Return>", lambda event: enviar_mensaje())
 
+# Botones
 btn_enviar = tk.Button(frame_input, text="Enviar", command=enviar_mensaje)
 btn_enviar.pack(side=tk.RIGHT)
+btn_seleccionar = tk.Button(frame_input, text="Seleccionar archivo", command=seleccionar_archivo)
+btn_seleccionar.pack(side=tk.LEFT, padx=5)
+btn_enviar_archivo = tk.Button(frame_input, text="Enviar archivo", command=enviar_archivo)
+btn_enviar_archivo.pack(side=tk.LEFT, padx=5)
+
 
 # === Enviar conexión inicial y arrancar recepción ===
 cliente.sendall(construir_trama_conexion(MI_USUARIO))

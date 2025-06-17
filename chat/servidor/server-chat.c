@@ -14,6 +14,8 @@
 
 #define OPCODE_CONNECT 1
 #define OPCODE_SENDMSG 3
+#define OPCODE_SENDFILE 4
+#define OPCODE_FILEDATA 5
 #define OPCODE_ERROR 6
 #define OPCODE_ACK 7
 #define OPCODE_USER_EVENT 8
@@ -22,6 +24,7 @@
 #define USER_EVENT_DISCONNECT 1
 
 #define ACK_CODE_USER_CONNECTED 1
+#define ACK_CODE_READY_TO_RECV_FILE 2
 #define ERROR_TOO_LONG_NAME 1
 #define ERROR_DUPLICATE_NAME 2
 
@@ -120,6 +123,94 @@ static void *client_thread(void *arg)
                     send(clients[j].sockfd, outbuf, off, 0);
                     printf("Thread[%d]: forwarded to '%s' fd=%d (%d bytes)\n",
                            thread_id, dest, clients[j].sockfd, off);
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&clients_mutex);
+        }
+        if (opcode == OPCODE_SENDFILE)
+        {
+            if (size < 2) continue;  // Debe al menos tener el campo accion
+
+            // Extraer campo "accion" (2 bytes)
+            uint16_t accion;
+            memcpy(&accion, payload, 2);
+            accion = ntohs(accion);
+
+            // Ajustar el puntero del payload para que apunte al resto
+            unsigned char *payload_ptr = payload + 2;
+
+            // Extraer origen y destino
+            char *orig = (char *)payload_ptr;
+            char *dest = orig + strlen(orig) + 1;
+
+            printf("Thread[%d]: Trama SENDFILE recibida (accion=%d) de %s para %s\n",
+                thread_id, accion, orig, dest);
+
+            // Preparar encabezado + reenviar al destinatario
+            uint16_t out_hdr[2] = { htons(OPCODE_SENDFILE), htons(size) };
+            unsigned char outbuf[4 + BUFFER_SIZE];
+            int off = 0;
+
+            memcpy(outbuf + off, out_hdr, 4);
+            off += 4;
+
+            memcpy(outbuf + off, payload, size);  // Reenviar tal como fue recibido
+            off += size;
+
+            pthread_mutex_lock(&clients_mutex);
+            for (int j = 0; j < MAX_CLIENTS; j++)
+            {
+                if (clients[j].sockfd > 0 &&
+                    strcmp(clients[j].username, dest) == 0)
+                {
+                    send(clients[j].sockfd, outbuf, off, 0);
+                    printf("Thread[%d]: Trama SENDFILE reenviada a '%s' fd=%d (%d bytes)\n",
+                        thread_id, dest, clients[j].sockfd, off);
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&clients_mutex);
+        }
+        if (opcode == OPCODE_FILEDATA)
+        {
+            // Asegurarse de que el tamaño mínimo es suficiente para 2 strings null-terminated
+            if (size < 3) continue;
+
+            char *orig = (char *)payload;
+            char *dest = orig + strlen(orig) + 1;
+
+            // Verificar que hay espacio suficiente para encontrar destino
+            if ((dest - (char *)payload) >= size) continue;
+
+            // Puntero a los datos
+            // unsigned char *data = (unsigned char *)(dest + strlen(dest) + 1);
+            int data_len = size - (strlen(orig) + 1 + strlen(dest) + 1);
+
+            printf("Thread[%d]: Trama FILEDATA recibida de '%s' para '%s' (%d bytes de datos)\n",
+                thread_id, orig, dest, data_len);
+
+            // Reenviar al destinatario
+            pthread_mutex_lock(&clients_mutex);
+            for (int j = 0; j < MAX_CLIENTS; j++)
+            {
+                if (clients[j].sockfd > 0 && strcmp(clients[j].username, dest) == 0)
+                {
+                    uint16_t out_hdr[2] = { htons(OPCODE_FILEDATA), htons(size) };
+                    unsigned char outbuf[4 + BUFFER_SIZE];
+                    int off = 0;
+
+                    // Copiar encabezado
+                    memcpy(outbuf + off, out_hdr, 4);
+                    off += 4;
+
+                    // Copiar payload completo
+                    memcpy(outbuf + off, payload, size);
+                    off += size;
+
+                    send(clients[j].sockfd, outbuf, off, 0);
+                    printf("Thread[%d]: Trama FILEDATA reenviada a '%s' fd=%d (%d bytes)\n",
+                        thread_id, dest, clients[j].sockfd, off);
                     break;
                 }
             }
