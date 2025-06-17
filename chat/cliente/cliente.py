@@ -307,6 +307,21 @@ def procesar_trama_filedata(payload):
         # Si ya recibimos todo, cerramos
         if archivo_actual_bytes_recibidos >= archivo_actual_tamano:
             archivo_en_recepcion.close()
+            area_chat.insert(tk.END, f"{origen}: Archivo '{archivo_actual_nombre}' recibido.\n")
+            area_chat.yview(tk.END)
+
+            # Guardar en historial
+            if origen not in mensajes_por_usuario:
+                mensajes_por_usuario[origen] = []
+
+            if origen == usuario_seleccionado:
+                actualizar_chat()
+            else:
+                notificaciones_pendientes[origen] = True
+                actualizar_lista_usuarios()
+
+            mensajes_por_usuario[origen].append(f"{origen} te ha enviado el archivo '{archivo_actual_nombre}'")
+            actualizar_chat()
             print(f"[INFO] Archivo recibido y guardado como '{archivo_actual_nombre}'")
             archivo_en_recepcion = None
 
@@ -408,6 +423,16 @@ def enviar_tramas_filedata(origen, destino, nombre_archivo, file_size, sock):
                 print(f"[INFO] Trama FILEDATA enviada ({len(data)} bytes)")
 
         print("[INFO] Transferencia completa.")
+        # Mostrar en la interfaz
+        area_chat.insert(tk.END, f"Tú: Archivo '{nombre_archivo}' enviado correctamente.\n")
+        area_chat.yview(tk.END)
+
+        # Registrar en el historial por usuario
+        if usuario_seleccionado not in mensajes_por_usuario:
+            mensajes_por_usuario[usuario_seleccionado] = []
+
+        mensajes_por_usuario[usuario_seleccionado].append(f"Tú: Archivo '{nombre_archivo}' enviado correctamente.")
+        actualizar_chat()
 
     except Exception as e:
         print(f"[ERROR] Al enviar archivo: {e}")
@@ -489,7 +514,7 @@ def actualizar_lista_usuarios():
 # === Ventana principal ===
 ventana = tk.Tk()
 ventana.title(f"Chat - {MI_USUARIO}")
-ventana.geometry("600x400")
+ventana.geometry("800x600")
 
 frame_usuarios = ttk.Frame(ventana)
 frame_usuarios.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
@@ -515,7 +540,7 @@ input_mensaje.bind("<Return>", lambda event: enviar_mensaje())
 # Botones
 btn_enviar = tk.Button(frame_input, text="Enviar", command=enviar_mensaje)
 btn_enviar.pack(side=tk.RIGHT)
-btn_seleccionar = tk.Button(frame_input, text="Seleccionar archivo", command=seleccionar_archivo)
+btn_seleccionar = tk.Button(frame_input, text="📁", command=seleccionar_archivo)
 btn_seleccionar.pack(side=tk.LEFT, padx=5)
 btn_enviar_archivo = tk.Button(frame_input, text="Enviar archivo", command=enviar_archivo)
 btn_enviar_archivo.pack(side=tk.LEFT, padx=5)
