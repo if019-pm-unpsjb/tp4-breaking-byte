@@ -302,7 +302,6 @@ def procesar_trama_filedata(payload):
 
         archivo_en_recepcion.write(data)
         archivo_actual_bytes_recibidos += len(data)
-        print(f"[INFO] Recibidos {archivo_actual_bytes_recibidos}/{archivo_actual_tamano} bytes")
 
         # Si ya recibimos todo, cerramos
         if archivo_actual_bytes_recibidos >= archivo_actual_tamano:
@@ -386,7 +385,6 @@ def procesar_trama_sendfile(payload, sock):
             archivo_actual_nombre = nombre_archivo
             archivo_actual_tamano = file_size
             archivo_actual_bytes_recibidos = 0
-            print(f"NOMBRE ARCHIVOOOOOOOOO: '{nombre_archivo}'")
             archivo_en_recepcion = open(nombre_archivo, "wb")
 
             sock.sendall(trama)
@@ -420,7 +418,6 @@ def enviar_tramas_filedata(origen, destino, nombre_archivo, file_size, sock):
                 trama = struct.pack('!HH', opcode, size) + payload
 
                 sock.sendall(trama)
-                print(f"[INFO] Trama FILEDATA enviada ({len(data)} bytes)")
 
         print("[INFO] Transferencia completa.")
         # Mostrar en la interfaz
