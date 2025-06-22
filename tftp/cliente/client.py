@@ -119,7 +119,6 @@ if operacion == "WRITE":
                         sys.exit(1)
 
                     if ack_packet[0:2] == b'\x00\x04' and ack_packet[2:4] == b'\x00\x00':
-                        print("Se recibió el ACK 0")
                         ack_received = True
                     else:
                         print("ACK inesperado recibido. Reintentando WRQ...")

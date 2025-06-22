@@ -216,10 +216,12 @@ void manejar_cliente(int sockfd, tftp_packet_t pkt, ssize_t n, struct sockaddr_i
          */
         /* Copiamos el nombre en un buffer propio para que no se sobrescriba luego */
         char filename_buf[512];
+        char mode_buf[256];
         strncpy(filename_buf, pkt.payload, sizeof(filename_buf) - 1);
-        char *mode = filename_buf + strlen(filename_buf) + 1;
         filename_buf[sizeof(filename_buf) - 1] = '\0';
-        printf("WRQ → filename=\"%s\", mode=\"%s\"\n", filename_buf, mode);
+        strncpy(mode_buf, pkt.payload + strlen(filename_buf) + 1, sizeof(mode_buf) - 1);
+        mode_buf[sizeof(mode_buf) - 1] = '\0';
+        printf("WRQ → filename=\"%s\", mode=\"%s\"\n", filename_buf, mode_buf);
 
         FILE *fd = fopen(filename_buf, "r");
         if (fd != NULL)
